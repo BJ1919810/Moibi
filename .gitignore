@@ -1,0 +1,49 @@
+# 依赖
+node_modules/
+**/node_modules/
+
+# 构建产物
+dist/
+**/dist/
+build/
+**/build/
+
+# Android SDK（体积巨大，不入库）
+android-sdk/
+
+# Gradle 缓存
+.gradle/
+**/.gradle/
+
+# Android 构建产物
+client/android/app/build/
+client/android/.gradle/
+client/android/build/
+client/android/local.properties
+client/android/captures/
+client/android/app/release/
+
+# 日志
+*.log
+logs/
+
+# 环境与密钥
+.env
+.env.local
+*.keystore
+*.jks
+key.properties
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Capacitor 临时
+.client/

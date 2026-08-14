@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">墨笔</string>
+    <string name="title_activity_main">墨笔</string>
+    <string name="package_name">com.mobin.writer</string>
+    <string name="custom_url_scheme">com.mobin.writer</string>
+</resources>

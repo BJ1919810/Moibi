@@ -1,0 +1,7 @@
+{
+  "appId": "com.mobin.writer",
+  "appName": "墨笔",
+  "webDir": "dist",
+  "server": { "androidScheme": "https" },
+  "android": { "backgroundColor": "#f5f0e4" }
+}

@@ -11,16 +11,20 @@ let secureStorePromise = null;
 
 function getSecureStore() {
   if (!secureStorePromise) {
-    secureStorePromise = (async () => {
-      try {
-        const { Capacitor } = await import('@capacitor/core');
-        if (!Capacitor.isNativePlatform()) return null;
-        const mod = await import('@aparajita/capacitor-secure-storage');
-        return mod.SecureStorage;
-      } catch {
-        return null;
-      }
-    })();
+    secureStorePromise = Promise.race([
+      (async () => {
+        try {
+          const { Capacitor } = await import('@capacitor/core');
+          if (!Capacitor.isNativePlatform()) return null;
+          const mod = await import('@aparajita/capacitor-secure-storage');
+          return mod.SecureStorage;
+        } catch {
+          return null;
+        }
+      })(),
+      // 安全存储初始化兜底：2 秒内未就绪视为不可用，回退 localStorage，避免保存/读取流程悬挂
+      new Promise((resolve) => setTimeout(() => resolve(null), 2000)),
+    ]);
   }
   return secureStorePromise;
 }
@@ -53,26 +57,56 @@ export async function loadKey() {
 
 export const getKey = () => (keyCache !== null ? keyCache : (localStorage.getItem(KEY_SLOT) || ''));
 
+/**
+ * 保存 API Key：返回 { ok } 供 UI 判断成败。
+ * 原生端优先写安全存储；安全存储失败时回退 localStorage，保证 Key 不丢失。
+ */
 export async function saveKey(k) {
   const value = k.trim();
   keyCache = value;
   const store = await getSecureStore();
   if (store) {
-    try {
-      if (value) await withTimeout(store.set(KEY_SLOT, value), 3000);
-      else await withTimeout(store.remove(KEY_SLOT), 3000);
+    if (!value) {
+      // 清空 Key：安全存储删除（带超时），localStorage 一并清理
+      try { await Promise.race([store.remove(KEY_SLOT), new Promise((resolve) => setTimeout(resolve, 3000))]); } catch { /* ignore */ }
       try { localStorage.removeItem(KEY_SLOT); } catch { /* ignore */ }
-    } catch { /* 安全存储失败不阻断 */ }
-    return;
+      return { ok: true };
+    }
+    // 写安全存储（带超时）：只有明确成功才迁移并清掉 localStorage；超时/失败一律回退 localStorage
+    let secureOk = false;
+    try {
+      await Promise.race([
+        store.set(KEY_SLOT, value).then(() => { secureOk = true; }),
+        new Promise((resolve) => setTimeout(resolve, 3000)),
+      ]);
+    } catch { /* 失败走兜底 */ }
+    if (secureOk) {
+      try { localStorage.removeItem(KEY_SLOT); } catch { /* ignore */ }
+      return { ok: true };
+    }
+    try {
+      localStorage.setItem(KEY_SLOT, value);
+      return { ok: true, fallback: true };
+    } catch {
+      return { ok: false, message: '本机存储不可用，Key 未能保存' };
+    }
   }
+  // 非原生端：直接 localStorage
   try {
     if (value) localStorage.setItem(KEY_SLOT, value);
     else localStorage.removeItem(KEY_SLOT);
-  } catch { /* ignore */ }
+    return { ok: true };
+  } catch {
+    return { ok: false, message: '浏览器存储不可用或已满，Key 未能保存' };
+  }
 }
 
 export const getThinking = () => localStorage.getItem(THINKING_SLOT) === '1';
 export const saveThinking = (v) => localStorage.setItem(THINKING_SLOT, v ? '1' : '0');
+
+const HQ_SLOT = 'mobin.deepseek.hq';
+export const getHqMode = () => localStorage.getItem(HQ_SLOT) === '1';
+export const saveHqMode = (v) => localStorage.setItem(HQ_SLOT, v ? '1' : '0');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -126,6 +160,8 @@ async function chatStream(messages, {
   thinking = false,
   useReasoningFallback = true,
   prefill,
+  jsonMode = false,
+  tools,
 } = {}) {
   // 先注册取消/超时：保证任何环节（含 Key 读取）都能被“停止”打断
   const timeout = customTimeout ?? 300_000;
@@ -165,6 +201,17 @@ async function chatStream(messages, {
     body.thinking = { type: 'disabled' };
   }
 
+  // 结构化输出：请求 json_object 模式（注意 prefill 会破坏 JSON，jsonMode 调用方不应传 prefill）
+  if (jsonMode) {
+    body.response_format = { type: 'json_object' };
+  }
+
+  // 真函数调用：注册工具，模型可输出结构化 tool_calls（由前端渲染为修改卡片，用户确认后应用）
+  if (tools?.length) {
+    body.tools = tools;
+    body.tool_choice = 'auto';
+  }
+
   const attemptFetch = async (attempt) => {
     const resp = await fetch(API_URL, {
       method: 'POST',
@@ -198,6 +245,7 @@ async function chatStream(messages, {
     let reasoningContent = '';
     let buffer = '';
     let finishReason = null;
+    let toolCalls = []; // 工具调用按 index 累积分片
 
     while (true) {
       const { done, value } = await reader.read();
@@ -238,16 +286,31 @@ async function chatStream(messages, {
           content += delta.content;
           onChunk?.(delta.content);
         }
+        // 工具调用：按 index 累积分片（id / name / arguments 可能分散在多个 chunk）
+        if (delta.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            const idx = tc.index ?? 0;
+            toolCalls[idx] = toolCalls[idx] || { id: '', name: '', arguments: '' };
+            if (tc.id) toolCalls[idx].id = tc.id;
+            if (tc.function?.name) toolCalls[idx].name = tc.function.name;
+            if (tc.function?.arguments) toolCalls[idx].arguments += tc.function.arguments;
+          }
+        }
       }
     }
 
     // 通知调用方流式结束原因（如 length 表示被截断），用于失败重试
     onFinish?.(finishReason);
 
+    const buildToolCalls = () => toolCalls
+      .filter(Boolean)
+      .map((tc) => ({ id: tc.id || '', name: tc.name || '', arguments: tc.arguments || '' }));
+
     // 达到 max_tokens 上限：保留已生成内容（哪怕不完整），末尾标注截断提示
     if (finishReason === 'length') {
       const partial = content.trim() || (useReasoningFallback ? reasoningContent.trim() : '');
       if (partial) {
+        if (tools?.length) return { content: (prefill || '') + partial, toolCalls: buildToolCalls() };
         return (prefill || '') + partial + `\n\n---\n⚠️ 达到 max_tokens 上限（${body.max_tokens}），内容被截断，可调大 maxTokens 后重试。`;
       }
     }
@@ -255,10 +318,14 @@ async function chatStream(messages, {
     // 兜底：content 为空时取 reasoning（discuss 等依赖 content 解析的场景可关 useReasoningFallback）
     const finalContent = content.trim() || (useReasoningFallback ? reasoningContent.trim() : '');
 
-    if (!finalContent) {
+    if (!finalContent && toolCalls.length === 0) {
       throw new Error('API 流式返回完毕但内容为空，请检查模型或参数');
     }
 
+    if (tools?.length) {
+      // 工具模式：返回正文 + 工具调用（由前端渲染为修改卡片，用户确认后应用）
+      return { content: (prefill || '') + finalContent, toolCalls: buildToolCalls() };
+    }
     return (prefill || '') + finalContent;
   } catch (e) {
     if (e.name === 'AbortError') {
@@ -270,6 +337,31 @@ async function chatStream(messages, {
     unregister();
     clearTimeout(timer);
   }
+}
+
+/** 结构化输出：json_object 模式请求 + JSON 解析；解析失败自动带纠正提示重试一次 */
+async function chatJson(messages, opts = {}) {
+  const base = { ...opts, jsonMode: true, useReasoningFallback: false, prefill: undefined };
+  let text = await chatStream(messages, base);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const cleaned = String(text || '')
+      .trim()
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/, '')
+      .trim();
+    try {
+      const parsed = JSON.parse(cleaned);
+      if (parsed && typeof parsed === 'object') return parsed;
+    } catch { /* 解析失败，带纠正提示重试 */ }
+    text = await chatStream(
+      [
+        ...messages,
+        { role: 'user', content: '上一条回复不是合法 JSON 或解析失败。请只输出一个合法的 JSON 对象本身：不要 Markdown 代码块、注释、说明或任何额外文字，字段名与字段结构保持不变。' },
+      ],
+      base
+    );
+  }
+  throw new Error('AI 返回的 JSON 无法解析，请重试');
 }
 
 /** 验证 API Key 是否有效（GET /models 最省 token） */
@@ -330,13 +422,13 @@ function buildContext({ name, category, coreIdea, outline, characters, foreshado
   if (outline) lines.push(`\n【剧情大纲】\n${outline}`);
   if (characters) lines.push(`\n【角色设定】\n${characters}`);
   if (foreshadowing) lines.push(`\n【伏笔设计】\n${foreshadowing}`);
-  if (memory) lines.push(`\n【设定簿】（已确认的作品事实，禁止遗忘或矛盾；主角已获得的能力必须沿用）\n${memory}`);
+  if (memory) lines.push(`\n【设定簿】（当下情报：当前时间点的物品归属、身份与关系现状、地点状态、未了结线索与走势。与【剧情大纲】【角色设定】等静态规划不同——设定簿是"现在"的事实基准，随剧情推进更新；写作必须与现状一致，禁止矛盾或遗忘）\n${memory}`);
   return lines.join('\n');
 }
 
 // -------------------- 业务接口 --------------------
 
-export async function outline({ name, category, coreIdea, outline: prev, characters, foreshadowing, memory }) {
+export async function outline({ name, category, coreIdea, outline: prev, characters, foreshadowing, memory, direction }) {
   const hasPrev = !!prev;
   const thinking = getThinking();
   const systemPrompt = `你是一位资深长篇网文策划编辑，擅长把一句话灵感深化成扎实、有层次的故事架构。
@@ -355,32 +447,112 @@ ${NO_META}${thinking ? THINKING_HINT : ''}`;
 
   const content = await chatStream([
     { role: 'system', content: systemPrompt },
-    { role: 'user', content: hasPrev ? `以下是我已有的作品信息和大纲，请在忠于类型与主题的前提下优化扩展：\n\n${buildContext({ name, category, coreIdea, characters, foreshadowing, memory })}\n\n已有大纲（请在保持题材基调的基础上深化，不要擅自切换类型）：\n${prev}` : `请基于以下信息，创作一部长篇小说的完整剧情架构。注意：必须忠于所选分类与主题，在既定类型内深化展开，不要跳到其他题材。\n\n${buildContext({ name, category, coreIdea, characters, foreshadowing, memory })}` },
+    { role: 'user', content: `${direction ? `已选定以下走向，必须严格按此展开为完整大纲：\n${direction}\n\n` : ''}${hasPrev ? `以下是我已有的作品信息和大纲，请在忠于类型与主题的前提下优化扩展：\n\n${buildContext({ name, category, coreIdea, characters, foreshadowing, memory })}\n\n已有大纲（请在保持题材基调的基础上深化，不要擅自切换类型）：\n${prev}` : `请基于以下信息，创作一部长篇小说的完整剧情架构。注意：必须忠于所选分类与主题，在既定类型内深化展开，不要跳到其他题材。\n\n${buildContext({ name, category, coreIdea, characters, foreshadowing, memory })}`}` },
   ], { temperature: 1.0, maxTokens: 8192, thinking, useReasoningFallback: false, prefill: '# 一句话梗概\n' });
   return { content };
 }
 
+/**
+ * 大纲多方案（分支选择）：一次生成 3 个在关键决策点上差异化的大纲方案，
+ * 由用户挑选一条作为主线（JSON 输出，前端渲染选择卡片）。
+ */
+export async function outlineVariants({ name, category, coreIdea, outline: prev, characters, foreshadowing, memory }) {
+  const hasPrev = !!prev;
+  const thinking = getThinking();
+  const systemPrompt = `你是一位资深长篇网文策划编辑，擅长把一句话灵感深化成扎实、有层次的故事架构，并且能为同一部作品给出差异化的发展路线。
+## 创作原则
+- 忠于类型与主题：言情就写言情、校园就写校园。所有方案都必须在既定类型内深化，不得混入或切换成其他题材。
+- 把一句话灵感当成种子，在题材的土壤里长成大树：靠情感、人物关系、主题与冲突层次来扩展，而非堆砌异质元素。
+- 构建多层冲突（内心 → 人际 → 观念 → 类型核心矛盾），层层递进；设计主线 + 副线 + 暗线，每条线服务于核心主题。
+- 如果已有角色设定或伏笔设计，必须严格沿用其中的人名、身份、称号与关系网，只做深化与扩展，不得擅自推翻。
+- 在用户已有内容基础上合理扩展约 2-3 倍，避免逐字演绎。
+## 任务
+- 给出 3 个差异化的发展走向，每个走向在关键决策点上与另外两个明显不同：可选主线冲突的核心驱动（如复仇/守护/寻根/成长）、反派的根本动机、开局切入点、结局走向等 1-2 个维度做差异，但都必须忠于作品的分类与主题。
+- 每个走向只写约 100 字：简练说明核心冲突驱动、反派动机、开局切入点与结局走向，不展开场景、对话或细节（详尽大纲会在用户选定后另行生成）。
+## 输出要求（必须严格遵守）
+- 只输出一个合法 JSON 对象：{"variants": [ {"name": "方案短标签（6-10字）", "pivot": "一句话说明本方案的核心差异", "pitch": "约 100 字的简练走向描述"} ] }
+- 输出里不要出现 JSON 以外的任何文字（不要 Markdown 代码块、注释、开场白或总结）
+${thinking ? THINKING_HINT : ''}`;
+
+  const data = await chatJson([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: hasPrev
+      ? `以下是我已有的作品信息和大纲，请给出 3 个差异化方案（在忠于类型与主题的前提下，围绕已有大纲做不同走向的深化与重构）：\n\n${buildContext({ name, category, coreIdea, characters, foreshadowing, memory })}\n\n已有大纲：\n${prev}`
+      : `请基于以下信息，给出 3 个差异化的大纲方案：\n\n${buildContext({ name, category, coreIdea, characters, foreshadowing, memory })}` },
+  ], { temperature: 1.2, maxTokens: 8192, thinking });
+
+  const list = Array.isArray(data?.variants) ? data.variants : [];
+  if (list.length < 2) throw new Error('AI 返回的方案不足，请重试');
+  return { variants: list };
+}
+
 export async function characters({ name, category, coreIdea, outline, memory }) {
   const thinking = getThinking();
-  const content = await chatStream([
+  const data = await chatJson([
     {
       role: 'system',
       content: `你是一位角色设计大师，擅长为长篇小说创造有血有肉、动机清晰的群像阵容。
 ## 设计要求
-- 设计 5-8 个角色，分三类：
-  1. 主角团（2-3人）：性格互补、有清晰的成长轨迹
-  2. 配角群（2-3人）：推动剧情的关键节点，有独立故事线
-  3. 反派/对立面（2-3人）：动机必须合理，不作"纯恶"
-- 每个角色包含：姓名、身份/称号、外貌特征、性格、核心动机、人物弧光、关系网
+- 设计 5-8 个角色，分三类：主角团（2-3人）、配角群（2-3人）、反派/对立面（2-3人）
+- 每个角色动机必须合理，不作"纯恶"
 - 每个角色注明"高光时刻"的大致阶段（角色个人的爆发/转折点）；跨章节的全局伏笔交给伏笔模块
-- 用 Markdown 列出，简洁精炼
 - 设定必须忠于作品分类的题材基调，不引入与类型冲突的设定（如言情里塞入修仙力量体系、校园里塞入异能/末世元素）
-- 一次性给出最终版本：输出全程只有角色设定本身，不包含任何修改、整理、归档、说明或过程性文字
-${NO_META}${thinking ? THINKING_HINT : ''}`,
+## 输出要求（必须严格遵守）
+- 只输出一个合法 JSON 对象，结构为 {"characters": [ ... ]}
+- 每张角色卡字段固定，缺失用空字符串或空数组：
+{
+  "name": "姓名",
+  "aliases": ["别名"],
+  "role": "主角 或 配角 或 反派",
+  "gender": "男/女/其他",
+  "age": "年龄或未知",
+  "identity": "身份/称号",
+  "appearance": "外貌特征",
+  "personality": "性格",
+  "motivation": "核心动机",
+  "arc": "人物弧光（成长轨迹）",
+  "relationships": [{"name": "对方姓名", "relation": "关系", "note": "简述"}],
+  "abilities": ["能力/技能"],
+  "status": "alive",
+  "highlight": "高光时刻大致阶段"
+}
+- relationships 中的"对方姓名"必须是本组角色中已有的名字；无法对应时省略该条
+- 输出里不要出现 JSON 以外的任何文字（不要 Markdown 代码块、注释、开场白或总结）
+${thinking ? THINKING_HINT : ''}`,
     },
     { role: 'user', content: `请为以下作品设计主要角色阵容：\n\n${buildContext({ name, category, coreIdea, outline, memory })}` },
-  ], { temperature: 1.0, maxTokens: 8192, thinking, useReasoningFallback: false });
-  return { content };
+  ], { temperature: 1.0, maxTokens: 8192, thinking });
+  const list = Array.isArray(data?.characters) ? data.characters : [];
+  if (list.length === 0) throw new Error('AI 返回的角色卡为空，请重试');
+  return { cards: list };
+}
+
+/**
+ * 章节后同步角色卡：根据本章【设定更新】把变化落到对应卡片的字段
+ * （新能力 → abilities；关系变化 → relationships；死亡/失踪 → status）。
+ * 独立于设定簿的文本合并，best-effort：模型丢弃原角色时放弃本次同步。
+ */
+export async function syncCharacterCards({ name, cards, stateUpdate }) {
+  const thinking = getThinking();
+  const list = Array.isArray(cards) ? cards : [];
+  const sys = `你是长篇小说的角色管理员，负责根据本章【设定更新】更新角色卡。
+## 更新规则
+- 逐张卡判断：新能力→追加到 abilities（去重）；关系变化→更新 relationships；死亡/失踪/身份变更→更新 status 与 statusNote；本章无相关变化的卡保持原样
+- 设定更新中出现的新登场重要角色→追加一张新卡（未知字段用空字符串）
+- status 取值：alive（存活）/ dead（死亡）/ missing（失踪）/ changed（已变化）
+- 除上述规则外不得改动角色卡的其他内容
+- 只输出合法 JSON 对象 {"characters": [ ... ]}，字段与输入完全一致，不输出任何其他文字`;
+  const data = await chatJson([
+    { role: 'system', content: sys },
+    { role: 'user', content: `作品：《${name}》\n当前角色卡（JSON）：\n${JSON.stringify({ characters: list }, null, 2)}\n\n本章【设定更新】：\n${String(stateUpdate || '').slice(0, 4000)}\n\n请输出更新后的完整角色卡数组 JSON。` },
+  ], { temperature: 0.2, maxTokens: 8192, thinking });
+  const out = Array.isArray(data?.characters) ? data.characters : [];
+  if (out.length === 0) return { cards: list };
+  // 防丢角色：模型必须保留所有原角色名（允许追加新角色）
+  const original = new Set(list.map((c) => c.name).filter(Boolean));
+  const missing = [...original].filter((n) => !out.some((c) => c?.name === n));
+  if (missing.length > 0) return { cards: list };
+  return { cards: out };
 }
 
 export async function foreshadowing({ name, category, coreIdea, outline, characters, memory }) {
@@ -412,7 +584,7 @@ ${NO_META}${thinking ? THINKING_HINT : ''}`,
   return { content };
 }
 
-export async function chapter({ name, category, coreIdea, outline, characters, foreshadowing, memory, prevChapter, chapterIndex, notes, hint, correction, onChunk }) {
+export async function chapter({ name, category, coreIdea, outline, characters, foreshadowing, memory, prevChapter, chapterIndex, notes, hint, correction, planText, onChunk }) {
   const thinking = getThinking();
   const prevInfo = prevChapter ? `## 上一章信息
 章节：第 ${chapterIndex - 1} 章《${prevChapter.title}》
@@ -433,6 +605,9 @@ ${notes ? `## 上一章随笔（作者备查，供参考）\n${notes}` : ''}
 ${hint ? `## 本章用户提示
 用户希望本章参考以下内容作为开头或动机：
 ${hint}` : ''}
+
+${planText ? `## 本章规划（必须严格按此展开）
+${planText}` : ''}
 
 现在续写第 ${chapterIndex} 章正文：
 1. 第一行直接是"第X章 标题"，随后立即进入正文，正文从第一个字开始就是小说本身。
@@ -461,6 +636,92 @@ ${CONSISTENCY_RULE}${correction ? `\n\n${correction}` : ''}` },
   return { content, stateUpdate };
 }
 
+/* ---------------- 高质量模式管线：规划 → 草稿 → 批改 ---------------- */
+
+/** 第一步：章节规划（低温度，JSON）。失败不阻断续写 */
+async function generateChapterPlan({ name, category, coreIdea, outline, characters, foreshadowing, memory, prevChapter, chapterIndex, notes, hint }) {
+  const thinking = getThinking();
+  const prevInfo = prevChapter
+    ? `上一章：第 ${chapterIndex - 1} 章《${prevChapter.title}》\n结尾 300 字：${prevChapter.content.slice(-300)}`
+    : '';
+  const data = await chatJson([
+    {
+      role: 'system',
+      content: `你是长篇小说的章节规划师。根据作品设定与上一章结尾，为下一章制定简短规划，帮助写手一次写对。
+## 输出要求（只输出 JSON，不要任何其他文字）
+{"motivation": "本章动机一句话（承接上一章或推进大纲）", "scenes": ["场景1（地点/事件）", "场景2", "场景3"], "dialogue_goals": ["对话目标1", "对话目标2"], "hook": "章末钩子一句话"}
+- 场景 2-3 个；动机必须与大纲、角色动机一致；不得引入与设定簿矛盾的事实`,
+    },
+    {
+      role: 'user',
+      content: `${buildContext({ name, category, coreIdea, outline, characters, foreshadowing, memory })}\n\n${prevInfo}\n\n${notes ? `上一章随笔：${notes}` : ''}${hint ? `\n本章用户提示：${hint}` : ''}\n\n请为第 ${chapterIndex} 章制定规划。`,
+    },
+  ], { temperature: 0.4, maxTokens: 1024, thinking });
+  return data;
+}
+
+const formatPlan = (p) => [
+  `本章动机：${p?.motivation || ''}`,
+  `场景安排：${Array.isArray(p?.scenes) ? p.scenes.map((s, i) => `${i + 1}. ${s}`).join('；') : ''}`,
+  `对话目标：${Array.isArray(p?.dialogue_goals) ? p.dialogue_goals.join('、') : ''}`,
+  `章末钩子：${p?.hook || ''}`,
+].filter((l) => l.trim()).join('\n');
+
+/** 第三步：一致性批改（低温度，JSON）——只核查与既有设定的矛盾，不评文笔 */
+async function critiqueChapter({ name, outline, characters, foreshadowing, memory, chapterIndex, content }) {
+  const thinking = getThinking();
+  const data = await chatJson([
+    {
+      role: 'system',
+      content: `你是严格的连载编辑，负责核查章节正文与既有设定的一致性（不评价文笔）。
+## 核查范围
+- 与【剧情大纲】【角色设定】【伏笔设计】【设定簿】矛盾的地方：人物行为/身份/关系与设定不符、已获得能力凭空消失、伏笔揭示时机错乱、新增事实与设定簿冲突
+- 只报告事实性矛盾，不挑剔文笔、节奏、篇幅
+## 输出要求（只输出 JSON，不要任何其他文字）
+{"ok": true}   或   {"ok": false, "issues": ["具体问题1（指出涉及的角色/事实与依据）", "问题2"]}
+- issues 2-4 条，每条一句话，可执行`,
+    },
+    {
+      role: 'user',
+      content: `作品：《${name}》\n【剧情大纲】\n${String(outline || '').slice(0, 2000)}\n\n【角色设定】\n${String(characters || '').slice(0, 1500)}\n\n【伏笔设计】\n${String(foreshadowing || '').slice(0, 1500)}\n\n【设定簿】（当下情报：当前时间点的物品/关系/地点/线索状态）\n${String(memory || '').slice(0, 2500)}\n\n第 ${chapterIndex} 章正文：\n${String(content || '').slice(0, 6000)}`,
+    },
+  ], { temperature: 0.2, maxTokens: 1024, thinking });
+  return data;
+}
+
+/**
+ * 高质量模式：规划 → 草稿 → 批改 →（必要时）修订。
+ * 与 chapter() 返回同构的 { content, stateUpdate }，前端可直接复用既有落库逻辑。
+ */
+export async function chapterHQ({ correction, onPhase, ...base }) {
+  let planText = '';
+  try {
+    const plan = await generateChapterPlan(base);
+    planText = formatPlan(plan);
+    // 透明化：把规划抛给 UI 展示
+    onPhase?.({ plan: planText });
+  } catch { /* 规划失败不影响续写 */ }
+
+  let { content, stateUpdate } = await chapter({ ...base, planText, correction });
+  try {
+    const critique = await critiqueChapter({ ...base, content });
+    if (critique && critique.ok === false && Array.isArray(critique.issues) && critique.issues.length) {
+      // 透明化：展示批改未通过 + 问题清单，随后自动修订
+      onPhase?.({ critique: { ok: false, issues: critique.issues }, revising: true });
+      const feedback = critique.issues.join('\n');
+      ({ content, stateUpdate } = await chapter({
+        ...base,
+        planText,
+        correction: `上一条正文未通过一致性批改，请按以下意见修订后重新输出整章正文（第一行仍为"第X章 标题"，随后立即进入正文，不少于 2000 字）：\n${feedback}`,
+      }));
+      onPhase?.({ revised: true, revising: false });
+    } else {
+      onPhase?.({ critique: { ok: true, issues: [] }, revising: false });
+    }
+  } catch { /* 批改失败不阻断 */ }
+  return { content, stateUpdate };
+}
+
 /** 章节漏掉【设定更新】块时的补抽：只根据本章正文提取设定更新，不重写正文 */
 export async function chapterUpdateOnly({ name, content, memory }) {
   const thinking = getThinking();
@@ -479,7 +740,7 @@ export async function chapterUpdateOnly({ name, content, memory }) {
 （无）
 ${NO_META}`,
     },
-    { role: 'user', content: `作品：《${name}》\n现有设定簿（供比对，避免重复记录已有事实）：\n${String(memory || '').slice(0, 2000) || '（空）'}\n\n本章正文：\n${body}` },
+    { role: 'user', content: `作品：《${name}》\n现有设定簿（当下情报，供比对，避免重复记录已有事实）：\n${String(memory || '').slice(0, 2000) || '（空）'}\n\n本章正文：\n${body}` },
   ], { temperature: 0.3, maxTokens: 1024, thinking, useReasoningFallback: false, prefill: '【设定更新】\n' });
   return { content: out };
 }
@@ -504,52 +765,61 @@ export async function postProcessChapter({ name, memory, chapterIndex, title, co
 
   const result = await chatStream([
     { role: 'system', content: sysContent },
-    { role: 'user', content: `作品：《${name}》\n第 ${chapterIndex} 章标题：${title}\n设定簿（仅作一致性参考，不要重复输出）：\n${String(memory || '').slice(0, 2000) || '（空）'}\n\n${target}\n\n任务：${MODE_TEXT[mode] || MODE_TEXT.polish}\n\n原文：\n${String(content || '').slice(0, 12000)}` },
+    { role: 'user', content: `作品：《${name}》\n第 ${chapterIndex} 章标题：${title}\n设定簿（当下情报，仅作一致性参考，不要重复输出）：\n${String(memory || '').slice(0, 2000) || '（空）'}\n\n${target}\n\n任务：${MODE_TEXT[mode] || MODE_TEXT.polish}\n\n原文：\n${String(content || '').slice(0, 12000)}` },
   ], { temperature: 0.9, maxTokens: 8192, thinking, useReasoningFallback: false });
   return { content: result };
 }
 
+/** 创作讨论可用的修改工具（真函数调用）：模型以结构化参数提议修改，前端渲染卡片、用户确认后应用 */
+const DISCUSS_TOOLS = [
+  { type: 'function', function: { name: 'update_outline', description: '修改剧情大纲（完全替换为传入内容）', parameters: { type: 'object', properties: { content: { type: 'string', description: '新的大纲全文' } }, required: ['content'] } } },
+  { type: 'function', function: { name: 'update_characters', description: '修改角色设定（完全替换为传入内容）', parameters: { type: 'object', properties: { content: { type: 'string', description: '新的角色设定全文' } }, required: ['content'] } } },
+  { type: 'function', function: { name: 'update_foreshadowing', description: '修改伏笔设计（完全替换为传入内容）', parameters: { type: 'object', properties: { content: { type: 'string', description: '新的伏笔设计全文' } }, required: ['content'] } } },
+  { type: 'function', function: { name: 'update_memory', description: '修改设定簿（完全替换为传入内容）', parameters: { type: 'object', properties: { content: { type: 'string', description: '新的设定簿全文' } }, required: ['content'] } } },
+  { type: 'function', function: { name: 'update_latest_notes', description: '修改最新章节的作者随笔（备查）', parameters: { type: 'object', properties: { content: { type: 'string', description: '新的随笔内容' } }, required: ['content'] } } },
+  { type: 'function', function: { name: 'update_chapter', description: '修改指定章节的正文（只替换正文，不要带章节标题行）', parameters: { type: 'object', properties: { chapter_index: { type: 'number', description: '章节序号，从 1 开始，必须是已存在的章节' }, content: { type: 'string', description: '替换后的章节正文' } }, required: ['chapter_index', 'content'] } } },
+  { type: 'function', function: { name: 'update_chapter_title', description: '修改指定章节的标题', parameters: { type: 'object', properties: { chapter_index: { type: 'number', description: '章节序号，从 1 开始，必须是已存在的章节' }, title: { type: 'string', description: '新标题' } }, required: ['chapter_index', 'title'] } } },
+];
+
 export async function discuss({ context, messages, onChunk }) {
   const thinking = getThinking();
-  const content = await chatStream([
+  const { content, toolCalls } = await chatStream([
     { role: 'system', content:
 `你是一位温和但锐利的创作导师，与作者实时讨论小说创作。
 - 回答简洁有力：除了修改作品内容，回答一般不超过 300 字；可以提出尖锐问题帮助作者思考
-- 如果讨论后需要修改作品内容，在回复末尾用修改标记，我会自动执行：每个标记独占一行，形如【标记名】，下一行写替换内容；正文与修改块、各修改块之间用空行分隔；标记内容会完全替换原有对应内容
-- 可用标记：【修改大纲】【修改人设】【修改伏笔】【修改随笔】（修改最新章节的作者随笔备查）【修改设定】（修改设定簿，会完全替换）【修改章节：第X章】（只替换正文，X 必须是已存在的章节序号）【修改章节标题：第X章】（只替换标题）
-- 只有确实需要修改时才使用标记
-
-正确示例：
-你的回复文字...
-
-【修改人设】
-张三，男，25岁，性格沉稳...
+- 如果需要修改作品内容，使用可用的修改工具提出（一次可提议多项，每项一个工具调用）；只有确实需要修改时才调用工具
+- 工具提议不会立即生效，用户确认后才会应用
 
 ${NO_META}
 当前作品资料：
 ${context}${thinking ? THINKING_HINT : ''}` },
     ...messages.slice(-12),
-  ], { temperature: 0.8, maxTokens: 4096, thinking, onChunk, useReasoningFallback: false });
-  return { content };
+  ], { temperature: 0.8, maxTokens: 4096, thinking, onChunk, useReasoningFallback: false, tools: DISCUSS_TOOLS });
+  return { content, toolCalls: toolCalls || [] };
 }
 
-/** 整理压缩设定簿：去重、归类、控制长度，且不遗漏已确认事实 */
-export async function tidyMemory({ name, memory }) {
+/** 整理压缩设定簿：去重、归类、控制长度，且不遗漏已确认事实。
+ * hasCards=true（项目有角色卡）时：能力类条目已由角色卡管理，整理时删除能力条目不再保留。 */
+export async function tidyMemory({ name, memory, hasCards }) {
   const thinking = getThinking();
+  const groupRule = hasCards
+    ? '- 用二级标题分组：物品、身份与关系、地点与时间线、未了结的线索（能力类条目已由角色卡管理，直接删除能力条目，不再保留）'
+    : '- 用二级标题分组：能力、物品、身份与关系、地点与时间线、未了结的线索';
   const content = await chatStream([
     {
       role: 'system',
       content: `你是长篇小说的设定管理员，把散乱的设定簿整理成结构清晰、无遗漏的事实档案。
 ## 整理要求
-- 用二级标题分组：能力、物品、身份与关系、地点与时间线、未了结的线索
+${groupRule}
+- 设定簿是"当下情报"（当前时间点的状态，随剧情推进更新），不是大纲/规划：整理时保持时效性，旧状态若已被剧情推翻按原文标注，不把推断写成事实
 - 每条尽量一行，保留关键细节（来源/条件/限制），删除重复与口水话
-- 总长度不超过原文的 60%，但不得遗漏任何已确认事实
+- 总长度不超过原文的 60%，但不得遗漏任何已确认事实（能力条目按上一条规则处理）
 - 不要把推断写成事实；拿不准的标注"（待定）"
 - 只基于当前设定簿整理：不要引入、补充或推断设定簿之外的任何剧情信息
 ${NO_META}${thinking ? THINKING_HINT : ''}`,
     },
     { role: 'user', content: `作品：《${name}》\n当前设定簿：\n${memory || '（空）'}` },
-  ], { temperature: 0.3, maxTokens: 4096, thinking, useReasoningFallback: false, prefill: '## 能力\n' });
+  ], { temperature: 0.3, maxTokens: 4096, thinking, useReasoningFallback: false, prefill: hasCards ? '## 物品\n' : '## 能力\n' });
   return { content };
 }
 
@@ -618,6 +888,8 @@ export async function extractMemory({ name, chapters }) {
   const corpus = items.join('\n\n');
 
   const sysPrompt = `你是长篇小说的设定管理员，负责从章节正文中抽取已确认的设定事实，生成设定簿。
+## 定位
+- 设定簿是"当下情报"档案（当前时间点的物品归属/关系现状/地点状态/未了结线索），不是大纲或静态规划：只抽取"现在仍成立"的事实，已被剧情推翻的按正文标注
 ## 结构要求
 - 直接以 "## 能力" 开头，五个二级标题齐全且顺序固定：能力、物品、身份与关系、地点与时间线、未了结的线索
 - 每条尽量一行，保留关键细节（来源/条件/限制）

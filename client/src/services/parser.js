@@ -163,7 +163,15 @@ export function mergeMemory(existing, update, chapterNo) {
   const text = (update || '').replace(/^【设定更新】\s*/, '').trim();
   if (!text || /^[（(]?无[)）]?$/.test(text)) return existing || '';
 
-  const block = `【第${chapterNo}章】\n${text}`;
+  // 能力类条目已由角色卡管理（abilities 字段），设定簿不再收录，避免双事实源
+  const withoutAbilities = text
+    .split('\n')
+    .filter((l) => !/^\s*[-*]\s*(?:新?能力|能力提升)[：:]/.test(l))
+    .join('\n')
+    .trim();
+  if (!withoutAbilities) return existing || '';
+
+  const block = `【第${chapterNo}章】\n${withoutAbilities}`;
   const next = existing ? `${existing.replace(/\s+$/, '')}\n\n${block}` : block;
   const MAX_LEN = 8000;
   if (next.length <= MAX_LEN) return next;

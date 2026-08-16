@@ -12,6 +12,7 @@ function normalizeProject(p) {
     characters: p.characters || '',
     foreshadowing: p.foreshadowing || '',
     memory: p.memory || '',
+    characterCards: Array.isArray(p.characterCards) ? p.characterCards.map(normalizeCard) : [],
     chapters: Array.isArray(p.chapters)
       ? p.chapters.map((c) => ({
           ...c,
@@ -22,6 +23,34 @@ function normalizeProject(p) {
     discussions: Array.isArray(p.discussions) ? p.discussions : [],
     createdAt: p.createdAt || Date.now(),
     updatedAt: p.updatedAt || Date.now(),
+  };
+}
+
+/** 归一化单张角色卡：补齐缺失字段，保证前端与 AI 调用拿到的形状稳定 */
+function normalizeCard(c) {
+  return {
+    ...c,
+    id: c.id || uid(),
+    name: c.name || '未命名角色',
+    aliases: Array.isArray(c.aliases) ? c.aliases.map(String).filter(Boolean) : [],
+    role: ['主角', '配角', '反派'].includes(c.role) ? c.role : '配角',
+    gender: c.gender || '',
+    age: c.age || '',
+    identity: c.identity || '',
+    appearance: c.appearance || '',
+    personality: c.personality || '',
+    motivation: c.motivation || '',
+    arc: c.arc || '',
+    relationships: Array.isArray(c.relationships)
+      ? c.relationships.map((r) => ({ name: r?.name || '', relation: r?.relation || '', note: r?.note || '' })).filter((r) => r.name)
+      : [],
+    abilities: Array.isArray(c.abilities) ? c.abilities.map(String).filter(Boolean) : [],
+    status: ['alive', 'dead', 'missing', 'changed'].includes(c.status) ? c.status : 'alive',
+    statusNote: c.statusNote || '',
+    highlight: c.highlight || '',
+    sourceChapter: c.sourceChapter ?? null,
+    createdAt: c.createdAt || Date.now(),
+    updatedAt: c.updatedAt || Date.now(),
   };
 }
 
@@ -57,12 +86,12 @@ function newProject({ name, category, coreIdea }) {
     category: category || '未分类',
     coreIdea: coreIdea || '',
     outline: '', characters: '', foreshadowing: '', memory: '', notes: '',
-    chapters: [], discussions: [],
+    chapters: [], discussions: [], characterCards: [],
     createdAt: Date.now(), updatedAt: Date.now(),
   };
 }
 
-const cloneProject = (p) => ({ ...p, chapters: [...p.chapters], discussions: [...p.discussions] });
+const cloneProject = (p) => ({ ...p, chapters: [...p.chapters], discussions: [...p.discussions], characterCards: [...(p.characterCards || [])] });
 
 export const store = {
   listProjects(tags) {
@@ -103,8 +132,14 @@ export const store = {
     const projects = read();
     const p = projects.find((x) => x.id === id);
     if (!p) throw new Error('项目不存在');
-    const allowed = ['name', 'category', 'coreIdea', 'outline', 'characters', 'foreshadowing', 'memory', 'discussions'];
-    for (const k of allowed) if (patch[k] !== undefined) p[k] = patch[k];
+    const allowed = ['name', 'category', 'coreIdea', 'outline', 'characters', 'characterCards', 'foreshadowing', 'memory', 'discussions'];
+    for (const k of allowed) {
+      if (patch[k] === undefined) continue;
+      // 角色卡落库前归一化，保证任意写入路径都得到稳定形状
+      p[k] = k === 'characterCards'
+        ? (Array.isArray(patch[k]) ? patch[k].map(normalizeCard) : [])
+        : patch[k];
+    }
     p.updatedAt = Date.now();
     write(projects);
     return cloneProject(p);

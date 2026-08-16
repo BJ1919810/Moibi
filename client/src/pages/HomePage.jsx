@@ -3,9 +3,20 @@ import { api } from '../utils/api.js';
 import ConfirmDialog from '../components/ConfirmDialog.jsx';
 
 export const GENRES = [
-  '玄幻', '奇幻', '武侠', '仙侠', '修真', '都市', '青春校园', '言情',
-  '现实', '历史', '军事', '科幻', '末世', '悬疑', '恐怖', '诡秘怪谈',
-  '灵气复苏', '游戏', '轻小说', '同人', '诸天无限',
+  '玄幻', '奇幻', '仙侠', '武侠', '科幻', '都市', '历史', '军事', '悬疑', '现实',
+  '系统流', '废柴流', '种田', '基建', '无限流', '快穿', '穿书', '重生', '末世', '废土',
+  '同人', '二次元', '轻小说',
+  '搞笑', '轻松', '热血', '黑暗', '甜宠', '治愈', '正剧', '沙雕', '虐心',
+  '修真', '青春校园', '言情', '恐怖', '诡秘怪谈', '灵气复苏', '游戏', '诸天无限',
+];
+
+/** 分类分组（新建/编辑作品时的选择器展示）：大题材背景 / 核心设定与展开模式 / 衍生与文风 */
+export const GENRES_SECTIONS = [
+  { title: '大题材背景', tags: ['玄幻', '奇幻', '仙侠', '武侠', '科幻', '都市', '历史', '军事', '悬疑', '现实'] },
+  { title: '核心设定 · 展开模式', tags: ['系统流', '废柴流', '种田', '基建', '无限流', '快穿', '穿书', '重生', '末世', '废土'] },
+  { title: '衍生', tags: ['同人', '二次元', '轻小说'] },
+  { title: '文风基调', tags: ['搞笑', '轻松', '热血', '黑暗', '甜宠', '治愈', '正剧', '沙雕', '虐心'] },
+  { title: '其他常用', tags: ['修真', '青春校园', '言情', '恐怖', '诡秘怪谈', '灵气复苏', '游戏', '诸天无限'] },
 ];
 
 export default function HomePage({ onOpen }) {
@@ -185,16 +196,21 @@ export default function HomePage({ onOpen }) {
             <h3 className="modal__title">筛选分类</h3>
             <p className="modal__hint">可多选，作品需同时满足所选分类才会显示</p>
             <div className="genre-grid">
-              {singleTags.map((t) => (
-                <button
-                  type="button"
-                  key={t}
-                  className={`genre-btn ${selectedTags.includes(t) ? 'genre-btn--active' : ''}`}
-                  onClick={() => applyTags(toggleTag(t))}
-                >
-                  {t}
-                </button>
-              ))}
+              <div className="genre-sec">
+                <span className="genre-sec__label">已有分类</span>
+                <div className="genre-sec__tags">
+                  {singleTags.map((t) => (
+                    <button
+                      type="button"
+                      key={t}
+                      className={`genre-btn ${selectedTags.includes(t) ? 'genre-btn--active' : ''}`}
+                      onClick={() => applyTags(toggleTag(t))}
+                    >
+                      {t}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
             <div className="modal__actions">
               <button type="button" className="btn btn--ghost" onClick={() => applyTags([])}>清除筛选</button>
@@ -280,15 +296,22 @@ function CreateModal({ onClose, onCreated }) {
           </button>
           {showPicker && (
             <div className="genre-grid">
-              {GENRES.map((g) => (
-                <button
-                  type="button"
-                  key={g}
-                  className={`genre-btn ${selectedGenres.includes(g) ? 'genre-btn--active' : ''}`}
-                  onClick={() => toggleGenre(g)}
-                >
-                  {g}
-                </button>
+              {GENRES_SECTIONS.map((sec) => (
+                <div key={sec.title} className="genre-sec">
+                  <span className="genre-sec__label">{sec.title}</span>
+                  <div className="genre-sec__tags">
+                    {sec.tags.map((g) => (
+                      <button
+                        type="button"
+                        key={g}
+                        className={`genre-btn ${selectedGenres.includes(g) ? 'genre-btn--active' : ''}`}
+                        onClick={() => toggleGenre(g)}
+                      >
+                        {g}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               ))}
             </div>
           )}

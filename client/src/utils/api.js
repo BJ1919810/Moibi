@@ -97,6 +97,7 @@ export const api = {
     store.updateProject(created.id, {
       outline: data.outline,
       characters: data.characters,
+      characterCards: data.characterCards,
       foreshadowing: data.foreshadowing,
       memory: data.memory,
     });
@@ -106,10 +107,13 @@ export const api = {
   },
 
   aiOutline: ai.outline,
+  aiOutlineVariants: ai.outlineVariants,
   aiCharacters: ai.characters,
   aiForeshadowing: ai.foreshadowing,
   aiChapter: ai.chapter,
+  aiChapterHQ: ai.chapterHQ,
   aiChapterUpdateOnly: ai.chapterUpdateOnly,
+  aiSyncCards: ai.syncCharacterCards,
   aiPostProcess: ai.postProcessChapter,
   aiDiscuss: ai.discuss,
   aiTidyMemory: ai.tidyMemory,

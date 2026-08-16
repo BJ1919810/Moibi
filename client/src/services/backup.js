@@ -19,6 +19,7 @@ export function buildBackup(project) {
       characters: project.characters,
       foreshadowing: project.foreshadowing,
       memory: project.memory,
+      characterCards: Array.isArray(project.characterCards) ? project.characterCards : [],
       chapters: (project.chapters || []).map((c) => ({
         title: c.title || '',
         content: c.content || '',
@@ -55,6 +56,7 @@ export function parseBackup(text) {
     characters: str(p.characters),
     foreshadowing: str(p.foreshadowing),
     memory: str(p.memory),
+    characterCards: Array.isArray(p.characterCards) ? p.characterCards : [],
     chapters: Array.isArray(p.chapters)
       ? p.chapters.map((c) => ({
           title: str(c.title, 120),

@@ -66,3 +66,72 @@ export function parsePatches(content, project) {
     .trim();
   return { reply, cards, apply };
 }
+
+const TOOL_LABELS = {
+  update_outline: '修改大纲',
+  update_characters: '修改人设',
+  update_foreshadowing: '修改伏笔',
+  update_memory: '修改设定（设定簿）',
+  update_latest_notes: '修改随笔（最新章）',
+  update_chapter: '修改章节',
+  update_chapter_title: '修改章节标题',
+};
+
+/**
+ * 把模型发出的真函数调用（tool_calls）解析为修改卡片 + 应用补丁。
+ * 与 parsePatches 返回同构的 { cards, apply }，供讨论面板统一消费。
+ * @param {Array} toolCalls - [{ id, name, arguments }]
+ * @param {Object} project
+ */
+export function toolCallsToPatches(toolCalls, project) {
+  const cards = [];
+  const apply = { chapters: [], chapterTitles: [] };
+  const calls = Array.isArray(toolCalls) ? toolCalls : [];
+
+  for (const call of calls) {
+    const name = call?.name || '';
+    let args = {};
+    try {
+      args = typeof call.arguments === 'string' ? JSON.parse(call.arguments) : (call.arguments || {});
+    } catch { continue; }
+
+    const baseLabel = TOOL_LABELS[name] || name;
+    const pushCard = (label, note) => cards.push({
+      label: note ? `${label}（${note}）` : label,
+      body: String(args.content ?? args.title ?? '').trim(),
+      applied: false,
+    });
+
+    if (name === 'update_outline') { apply.outline = String(args.content || '').trim(); pushCard(baseLabel); }
+    else if (name === 'update_characters') { apply.characters = String(args.content || '').trim(); pushCard(baseLabel); }
+    else if (name === 'update_foreshadowing') { apply.foreshadowing = String(args.content || '').trim(); pushCard(baseLabel); }
+    else if (name === 'update_memory') { apply.memory = String(args.content || '').trim(); pushCard(baseLabel); }
+    else if (name === 'update_latest_notes') { apply.notes = String(args.content || '').trim(); pushCard(baseLabel); }
+    else if (name === 'update_chapter') {
+      const idx = (Number(args.chapter_index) || 0) - 1;
+      const val = String(args.content || '').trim();
+      if (!val) continue;
+      if (!Number.isNaN(idx) && idx >= 0 && idx < project.chapters.length) {
+        // 只替换正文；若模型顺带写了"第X章 标题"行，剥掉
+        const contentOnly = val.replace(/^(?:\s*#+\s*)?第.+?章[^\n]*\n?/, '').trim();
+        apply.chapters.push({ idx, content: contentOnly });
+        pushCard(`修改章节：第${args.chapter_index}章`);
+      } else {
+        pushCard(`修改章节：第${args.chapter_index}章`, '未应用：章节不存在');
+      }
+    }
+    else if (name === 'update_chapter_title') {
+      const idx = (Number(args.chapter_index) || 0) - 1;
+      const val = String(args.title || '').trim();
+      if (!val) continue;
+      if (!Number.isNaN(idx) && idx >= 0 && idx < project.chapters.length) {
+        apply.chapterTitles.push({ idx, title: val.replace(/^(?:#+\s*)?(?:第.+?章\s*)+/, '') });
+        pushCard(`修改章节标题：第${args.chapter_index}章`);
+      } else {
+        pushCard(`修改章节标题：第${args.chapter_index}章`, '未应用：章节不存在');
+      }
+    }
+    // 未知工具忽略
+  }
+  return { cards, apply };
+}

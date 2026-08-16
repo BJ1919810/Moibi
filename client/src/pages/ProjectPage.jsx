@@ -4,11 +4,13 @@ import { api } from '../utils/api.js';
 import { exportProject } from '../services/exporter.js';
 import { parseChapterOutput, mergeMemory, hasMetaOpening, hasGarbledDoc, dedupeLeadingLines } from '../services/parser.js';
 import { setAiBusy, clearAiBusy } from '../services/aiBusy.js';
-import { abortActiveRequest } from '../services/deepseek.js';
-import { parsePatches } from '../services/discussPatches.js';
+import { abortActiveRequest, getHqMode } from '../services/deepseek.js';
+import { parsePatches, toolCallsToPatches } from '../services/discussPatches.js';
 import { saveDraft, loadDraft, clearDraft } from '../services/drafts.js';
+import { renderCardsToText } from '../services/characterCards.js';
 import ConfirmDialog from '../components/ConfirmDialog.jsx';
-import { GENRES } from './HomePage.jsx';
+import CharactersPanel from '../components/CharactersPanel.jsx';
+import { GENRES_SECTIONS } from './HomePage.jsx';
 
 // 章节全屏编辑标志（供 App.jsx 返回键判断：全屏时退出全屏而非退出项目）
 let _chapterFullscreen = false;
@@ -198,15 +200,7 @@ export default function ProjectPage({ projectId, onBack }) {
 
       <section className="stage">
         <InfoPanel hidden={tab !== 'info'} project={project} onSave={patch} flash={flash} />
-        <DocPanel
-          hidden={tab !== 'characters'}
-          title="角色设定"
-          hint="AI 将根据一句话灵感设计主角、配角与反派"
-          value={project.characters}
-          busyText="正在塑造人物…"
-          onSave={(v) => patch({ characters: v }).then(() => flash('人设已保存 ✓'))}
-          onGenerate={() => api.aiCharacters({ name: project.name, category: project.category, coreIdea: project.coreIdea, outline: project.outline, memory: project.memory })}
-        />
+        <CharactersPanel hidden={tab !== 'characters'} project={project} onChanged={setProject} flash={flash} />
         <DocPanel
           hidden={tab !== 'foreshadowing'}
           title="伏笔设计"
@@ -227,23 +221,25 @@ export default function ProjectPage({ projectId, onBack }) {
         <DocPanel
           hidden={tab !== 'outline'}
           title="剧情大纲"
-          hint="AI 将根据已有设定推演完整的剧情大纲"
+          hint="AI 将推演多个差异化剧情方案，供你挑选主线"
           value={project.outline}
           busyText="正在推演剧情…"
+          variantsMode
           onSave={(v) => patch({ outline: v }).then(() => flash('大纲已保存 ✓'))}
-          onGenerate={() => api.aiOutline({ name: project.name, category: project.category, coreIdea: project.coreIdea, outline: project.outline, characters: project.characters, foreshadowing: project.foreshadowing, memory: project.memory })}
+          onGenerate={(direction) => api.aiOutline({ name: project.name, category: project.category, coreIdea: project.coreIdea, outline: project.outline, characters: project.characters, foreshadowing: project.foreshadowing, memory: project.memory, direction })}
+          onVariants={() => api.aiOutlineVariants({ name: project.name, category: project.category, coreIdea: project.coreIdea, outline: project.outline, characters: project.characters, foreshadowing: project.foreshadowing, memory: project.memory })}
         />
         <ChaptersPanel hidden={tab !== 'chapters'} project={project} onChanged={setProject} flash={flash} />
         <DocPanel
           hidden={tab !== 'memory'}
           title="设定簿"
-          hint="已确认的作品事实（能力 / 物品 / 关系 / 地点等）。续写时 AI 会把本章新变化自动同步进来；也可“从正文抽取”重建，或点“AI 整理”压缩"
+          hint="当下情报（物品 / 关系 / 地点 / 未了结线索等当前状态，随剧情更新；能力归角色卡）。续写时 AI 会把本章新变化自动同步进来；也可“从正文抽取”重建，或点“AI 整理”压缩"
           value={project.memory}
           busyText="正在整理设定簿…"
           extractBusyText="正在从正文抽取设定…"
           generateLabel="AI 整理"
           onSave={(v) => patch({ memory: v }).then(() => flash('设定簿已保存 ✓'))}
-          onGenerate={() => api.aiTidyMemory({ name: project.name, memory: project.memory })}
+          onGenerate={() => api.aiTidyMemory({ name: project.name, memory: project.memory, hasCards: (project.characterCards || []).length > 0 })}
           onExtract={() => {
             const chapters = project.chapters
               .map((c, i) => ({ index: i + 1, title: c.title, content: c.content }))
@@ -370,16 +366,23 @@ function InfoPanel({ hidden, project, onSave, flash }) {
           </button>
           {showPicker && (
             <div className="genre-grid">
-              {GENRES.map((g) => (
-                <button
-                  type="button"
-                  key={g}
-                  className={`genre-btn ${selectedGenres.includes(g) ? 'genre-btn--active' : ''}`}
-                  onClick={() => toggleGenre(g)}
-                  disabled={busy}
-                >
-                  {g}
-                </button>
+              {GENRES_SECTIONS.map((sec) => (
+                <div key={sec.title} className="genre-sec">
+                  <span className="genre-sec__label">{sec.title}</span>
+                  <div className="genre-sec__tags">
+                    {sec.tags.map((g) => (
+                      <button
+                        type="button"
+                        key={g}
+                        className={`genre-btn ${selectedGenres.includes(g) ? 'genre-btn--active' : ''}`}
+                        onClick={() => toggleGenre(g)}
+                        disabled={busy}
+                      >
+                        {g}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               ))}
             </div>
           )}
@@ -407,11 +410,13 @@ function InfoPanel({ hidden, project, onSave, flash }) {
 }
 
 /* ---------- 通用文档面板（大纲 / 人设 / 伏笔 / 设定簿） ---------- */
-function DocPanel({ hidden, title, hint, value, busyText, onSave, onGenerate, generateLabel, onExtract, extractLabel, extractBusyText }) {
+function DocPanel({ hidden, title, hint, value, busyText, onSave, onGenerate, generateLabel, onExtract, extractLabel, extractBusyText, variantsMode, onVariants }) {
   const [text, setText] = useState(value);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [preview, setPreview] = useState(false);
+  const [variants, setVariants] = useState(null); // 大纲走向列表
+  const [selectedIdx, setSelectedIdx] = useState(-1); // 当前选中的走向下标
   const dirty = text !== value;
 
   // 外部更新（续写后设定簿追加、讨论应用修改等）时同步显示，避免停留旧内容
@@ -419,25 +424,63 @@ function DocPanel({ hidden, title, hint, value, busyText, onSave, onGenerate, ge
     setText(value || '');
   }, [value]);
 
+  /** 采纳一段生成内容：去重开头、写入编辑区、自动保存 */
+  const adopt = async (content) => {
+    const out = dedupeLeadingLines(String(content || '').trim()); // 折叠 prefill 与模型重复输出的开头标题
+    setText(out);
+    if (hasGarbledDoc(out)) {
+      setError('⚠️ 生成结果疑似异常（混入了整理/修正类文字），已保留在编辑区供手动修改，建议再次生成');
+    } else {
+      await onSave(out);
+    }
+  };
+
   const generate = async () => {
-    if (!onGenerate) return;
+    if (!onGenerate && !onVariants) return;
     setBusy(true);
     setError('');
-    setAiBusy(busyText, abortActiveRequest);
+    setAiBusy(variantsMode ? '正在推演多个剧情方案…' : busyText, abortActiveRequest);
     try {
+      if (variantsMode && onVariants) {
+        // 多方案模式：先出方案列表，等用户挑选后再落库
+        const { variants: list } = await onVariants();
+        if (!Array.isArray(list) || list.length < 2) throw new Error('AI 返回的方案不足，请重试');
+        setVariants(list);
+        setSelectedIdx(-1);
+        return; // 等待用户选择走向
+      }
       let { content } = await onGenerate();
       if (hasGarbledDoc(content)) {
         // 输出混入"修正/整理/归档"等异常文字：重新生成一次
         setAiBusy('检测到输出异常，正在重新生成…', abortActiveRequest);
         ({ content } = await onGenerate());
       }
-      content = dedupeLeadingLines(content); // 折叠 prefill 与模型重复输出的开头标题
-      setText(content);
+      await adopt(content);
+    } catch (e) {
+      if (e.message !== '已取消') setError(e.message);
+    } finally {
+      setBusy(false);
+      clearAiBusy();
+    }
+  };
+
+  /** 第二阶段：把选中的走向展开为详尽大纲 */
+  const expandVariant = async () => {
+    const v = variants && selectedIdx >= 0 ? variants[selectedIdx] : null;
+    if (!v) return;
+    setBusy(true);
+    setError('');
+    setAiBusy('正在展开所选方案…', abortActiveRequest);
+    try {
+      const direction = [v.name, v.pivot, v.pitch].filter(Boolean).join('\n');
+      let { content } = await onGenerate(direction);
       if (hasGarbledDoc(content)) {
-        setError('⚠️ 生成结果疑似异常（混入了整理/修正类文字），已保留在编辑区供手动修改，建议再次生成');
-      } else {
-        await onSave(content);
+        // 输出混入"修正/整理/归档"等异常文字：重新生成一次
+        setAiBusy('检测到输出异常，正在重新生成…', abortActiveRequest);
+        ({ content } = await onGenerate(direction));
       }
+      setVariants(null);
+      await adopt(content);
     } catch (e) {
       if (e.message !== '已取消') setError(e.message);
     } finally {
@@ -512,6 +555,36 @@ function DocPanel({ hidden, title, hint, value, busyText, onSave, onGenerate, ge
           />
         )}
       </div>
+
+      {variants && (
+        <div className="modal-mask" style={{ zIndex: 200 }} onClick={() => setVariants(null)}>
+          <div className="modal modal--wide" onClick={(e) => e.stopPropagation()}>
+            <h2 className="modal__title">选择剧情走向</h2>
+            <p className="modal__hint">AI 给出了 {variants.length} 个简练走向（约 100 字），点击切换查看，选定后生成详尽大纲。</p>
+            <div className="variant-grid">
+              {variants.map((v, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  className={`variant-card ${selectedIdx === i ? 'variant-card--selected' : ''}`}
+                  onClick={() => setSelectedIdx(i)}
+                >
+                  <span className="variant-card__name">{v.name || `方案 ${i + 1}`}</span>
+                  {v.pivot && <span className="variant-card__pivot">{v.pivot}</span>}
+                  {v.pitch && <span className="variant-card__pitch">{v.pitch}</span>}
+                </button>
+              ))}
+            </div>
+            <div className="modal__actions">
+              <button type="button" className="btn btn--ghost" onClick={() => setVariants(null)}>关闭</button>
+              <button type="button" className="btn btn--ghost" onClick={() => { setVariants(null); generate(); }} disabled={busy}>🔁 重新生成</button>
+              <button type="button" className="btn btn--primary" onClick={expandVariant} disabled={selectedIdx < 0 || busy}>
+                {busy ? '展开中…' : '✨ 生成详细大纲'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -580,6 +653,7 @@ function ChaptersPanel({ hidden, project, onChanged, flash }) {
   const [showHint, setShowHint] = useState(false);
   const [hint, setHint] = useState('');
   const [draft, setDraft] = useState(null);
+  const [hqLog, setHqLog] = useState(null); // 高质量模式的决策过程（规划/批改）
 
   // 检查是否有上次中断/停止留下的续写草稿
   useEffect(() => {
@@ -597,8 +671,11 @@ function ChaptersPanel({ hidden, project, onChanged, flash }) {
   const continueWriting = async (hint = '') => {
     setBusy(true);
     setError('');
+    setHqLog(null);
     const chapterIndex = project.chapters.length + 1;
-    setAiBusy(`正在续写第 ${chapterIndex} 章…`, abortActiveRequest);
+    const hq = getHqMode();
+    const draftCall = hq ? api.aiChapterHQ : api.aiChapter;
+    setAiBusy(hq ? `正在规划并续写第 ${chapterIndex} 章…` : `正在续写第 ${chapterIndex} 章…`, abortActiveRequest);
     // 断点保护：把 AI 已输出的部分定期写入草稿，中断后可找回
     let draftText = `第${chapterIndex}章 `;
     const draftTimer = setInterval(() => {
@@ -620,14 +697,15 @@ function ChaptersPanel({ hidden, project, onChanged, flash }) {
         notes: last?.notes || '',
         hint,
         onChunk: (delta) => { draftText += delta; },
+        onPhase: hq ? (info) => setHqLog((prev) => ({ ...(prev || {}), ...info })) : undefined,
       };
-      let { content, stateUpdate } = await api.aiChapter(base);
+      let { content, stateUpdate } = await draftCall(base);
       let parsed = parseChapterOutput(content);
       if (hasMetaOpening(parsed.cleanContent)) {
         // 开头出现元话术：带纠错提示重新生成一次
         setAiBusy('开头异常，正在重新续写…', abortActiveRequest);
         draftText = `第${chapterIndex}章 `;
-        ({ content, stateUpdate } = await api.aiChapter({
+        ({ content, stateUpdate } = await draftCall({
           ...base,
           correction: '上一条回复开头出现了与小说无关的内容。请重新生成本章：第一行直接输出"第X章 标题"，随后立即进入正文。',
         }));
@@ -673,6 +751,22 @@ function ChaptersPanel({ hidden, project, onChanged, flash }) {
           updated = await api.updateProject(project.id, { memory });
           memorySynced = true;
         }
+      }
+      // 角色卡同步（best-effort：失败不影响章节保存；仅在有角色卡的项目上执行）
+      if (updateText && (project.characterCards || []).length > 0) {
+        try {
+          const synced = await api.aiSyncCards({
+            name: project.name,
+            cards: project.characterCards,
+            stateUpdate: updateText,
+          });
+          if (synced?.cards && JSON.stringify(synced.cards) !== JSON.stringify(project.characterCards)) {
+            updated = await api.updateProject(project.id, {
+              characterCards: synced.cards,
+              characters: renderCardsToText(synced.cards),
+            });
+          }
+        } catch { /* 同步失败保持原卡片 */ }
       }
       onChanged(updated);
       setEditing(chapter.id);
@@ -750,6 +844,36 @@ function ChaptersPanel({ hidden, project, onChanged, flash }) {
           </button>
         </div>
       </header>
+
+      {hqLog && (
+        <div className="hq-log">
+          <div className="hq-log__head">
+            <span>🛡️ AI 决策过程</span>
+            {busy && <span className="hq-log__live">进行中…</span>}
+            <button type="button" className="hq-log__close" title="收起" onClick={() => setHqLog(null)}>✕</button>
+          </div>
+          {hqLog.plan && (
+            <div className="hq-log__block">
+              <span className="hq-log__stage">规划</span>
+              <pre className="hq-log__text">{hqLog.plan}</pre>
+            </div>
+          )}
+          {hqLog.critique && (
+            <div className="hq-log__block">
+              <span className="hq-log__stage">批改</span>
+              {hqLog.critique.ok ? (
+                <p className="hq-log__ok">✅ 与既有设定一致，无需修订</p>
+              ) : (
+                <ul className="hq-log__issues">
+                  {hqLog.critique.issues.map((x, i) => <li key={i}>{x}</li>)}
+                </ul>
+              )}
+            </div>
+          )}
+          {hqLog.revising && <p className="hq-log__revising">🔁 正在按批改意见修订…</p>}
+          {hqLog.revised && <p className="hq-log__revised">✅ 已按批改意见自动修订</p>}
+        </div>
+      )}
 
       {draft && (
         <div className="draft-banner">
@@ -1096,14 +1220,14 @@ function DiscussPanel({ hidden, project, onPersist, onPatch }) {
         `大纲：${project.outline?.slice(0, CTX_LIMITS.outline) || '暂无'}`,
         `角色：${project.characters?.slice(0, CTX_LIMITS.characters) || '暂无'}`,
         `伏笔：${project.foreshadowing?.slice(0, CTX_LIMITS.foreshadowing) || '暂无'}`,
-        `设定簿：${project.memory?.slice(0, CTX_LIMITS.memory) || '暂无'}`,
+        `设定簿（当下情报）：${project.memory?.slice(0, CTX_LIMITS.memory) || '暂无'}`,
         `最新章节随笔：${project.chapters[project.chapters.length - 1]?.notes?.slice(0, 600) || '暂无'}`,
         `已写章节数：${project.chapters.length}`,
         project.chapters.length > 0
           ? `最新章节：第${project.chapters.length}章「${project.chapters[project.chapters.length - 1].title}」`
           : '',
       ].filter(Boolean).join('\n');
-      const { content } = await api.aiDiscuss({
+      const { content, toolCalls } = await api.aiDiscuss({
         context,
         messages: next.map(({ role, content }) => ({ role, content })),
         onChunk: (delta) => {
@@ -1116,8 +1240,11 @@ function DiscussPanel({ hidden, project, onPersist, onPatch }) {
         },
       });
 
-      // 单次正则解析所有修改标记，同时清理出纯净回复
-      const { reply, cards, apply } = parsePatches(content, project);
+      // 优先用真函数调用（tools）解析修改；模型未发工具调用时回退到旧标记协议
+      const parsed = (toolCalls && toolCalls.length)
+        ? toolCallsToPatches(toolCalls, project)
+        : parsePatches(content, project);
+      const { reply, cards, apply } = parsed;
 
       // 用清理后的回复 + 修改卡片替换流式气泡，等待用户确认后再应用
       const finalMsgs = [...next, { role: 'assistant', content: reply, cards }];

@@ -1,14 +1,17 @@
 import { useEffect, useState } from 'react';
-import { getKey, saveKey, loadKey, getThinking, saveThinking, testKey, abortActiveRequest } from '../services/deepseek.js';
+import { getKey, saveKey, loadKey, getThinking, saveThinking, getHqMode, saveHqMode, testKey, abortActiveRequest } from '../services/deepseek.js';
 import { setAiBusy, clearAiBusy } from '../services/aiBusy.js';
 
 export default function KeySettings({ onClose }) {
   const [key, setKey] = useState(getKey());
   const [thinking, setThinking] = useState(getThinking());
+  const [hq, setHq] = useState(getHqMode());
   const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
+  const [error, setError] = useState('');
 
   // 原生端 Key 可能来自安全存储，进入设置时异步刷新一次
   useEffect(() => {
@@ -23,10 +26,26 @@ export default function KeySettings({ onClose }) {
 
   const submit = async (e) => {
     e.preventDefault();
-    await saveKey(key);
-    saveThinking(thinking);
-    setSaved(true);
-    setTimeout(onClose, 700);
+    if (saving) return;
+    setSaving(true);
+    setError('');
+    try {
+      // 超时兜底：任何环节卡住都不让保存流程悬挂
+      const res = await Promise.race([
+        saveKey(key),
+        new Promise((resolve) => setTimeout(() => resolve({ ok: false, message: '保存超时，请重试' }), 6000)),
+      ]);
+      saveThinking(thinking);
+      saveHqMode(hq);
+      if (!res?.ok) {
+        setError('保存失败：' + (res?.message || '未知错误'));
+        return; // 不关闭弹窗，让用户看到错误
+      }
+      setSaved(true);
+      setTimeout(onClose, 700);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const test = async () => {
@@ -51,7 +70,6 @@ export default function KeySettings({ onClose }) {
           <span>DeepSeek API Key</span>
           <div className="key-input-row">
             <input
-              autoFocus
               type={showKey ? 'text' : 'password'}
               autoComplete="off"
               placeholder="sk-…"
@@ -72,8 +90,7 @@ export default function KeySettings({ onClose }) {
           </div>
         </label>
         <p className="settings__note">
-          🔒 Key 仅保存在本机，不会上传到任何服务器。<br />
-          前往 <b>platform.deepseek.com</b> 创建密钥，按量计费，写一本小说也就几毛钱。
+          🔒 Key 仅存本机，不会上传。<b>platform.deepseek.com</b> 创建，按量计费。
         </p>
 
         <div className="settings__actions">
@@ -97,15 +114,27 @@ export default function KeySettings({ onClose }) {
             {thinking ? '🧠 已开启' : '💭 未开启'}
           </button>
         </div>
-        <p className="settings__note">
-          开启后模型会先进行深度推理再输出，适合复杂创作任务。<br />
-          注意：思考模式会消耗更多 token，费用略高。
-        </p>
+        <p className="settings__note">开启后模型先深度推理再输出，适合复杂任务；消耗更多 token。</p>
 
+        <div className="field">
+          <span>高质量模式</span>
+          <button
+            type="button"
+            className={`thinking-toggle ${hq ? 'thinking-toggle--on' : ''}`}
+            onClick={() => setHq(!hq)}
+          >
+            {hq ? '🛡️ 已开启' : '⚡ 未开启'}
+          </button>
+        </div>
+        <p className="settings__note">续写走「规划 → 草稿 → 批改」：写前规划、写后自动一致性批改，不通过即修订。质量更高，耗时与费用略增。</p>
+
+        {error && <p className="settings__test settings__test--err">⚠️ {error}</p>}
         {saved && <p className="settings__ok">✓ 墨已研好</p>}
         <div className="modal__actions">
           <button type="button" className="btn btn--ghost" onClick={onClose}>取消</button>
-          <button type="submit" className="btn btn--primary">保存</button>
+          <button type="button" className="btn btn--primary" onClick={submit} disabled={saving}>
+            {saving ? '保存中…' : '保存'}
+          </button>
         </div>
       </form>
     </div>

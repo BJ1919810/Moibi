@@ -45,7 +45,7 @@ cd android
 # 产物：client/android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-也可以直接下载 [releases/moibi-debug.apk](./releases/moibi-debug.apk) 安装到手机（Debug 构建，约 4.2 MB）。
+也可以直接下载 [v1.0.0 发行页](https://github.com/BJ1919810/Moibi/releases/tag/v1.0.0)（含 `moibi-v1.0.0-debug.apk`） 安装到手机（Debug 构建，约 4.2 MB）。
 
 ## ⚙️ 配置
 
@@ -63,7 +63,7 @@ moibi/
 │   │   └── utils/api.js  # 统一业务入口
 │   ├── android/          # Capacitor Android 工程
 │   └── package.json
-└── releases/             # 可安装的 APK
+└── releases/             # 安装包见 Releases 页
 ```
 
 ## 📌 说明
@@ -94,5 +94,5 @@ moibi/
 - **453 项单测全绿**（`cd client && npm test`），含**源码扫描类防复发断言**
   （判据副本、野字段名、死代码复活都会被测试拦下）
 - 真浏览器验收脚本：`npm run verify:reader`（29 项）、`npm run verify:reveal:ui`（47 项）
-- **安装包**：[`releases/moibi-v2.0.0-release.apk`](releases/moibi-v2.0.0-release.apk)
+- **安装包**：[v2.0.0 发行页](https://github.com/BJ1919810/Moibi/releases/tag/v2.0.0)（含 `moibi-v2.0.0-release.apk`）
   （3104 KB，完全离线可用：模型调用直接从 App 发出，不需要电脑）

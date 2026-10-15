@@ -1,0 +1,22 @@
+# 依赖与构建产物
+node_modules/
+dist/
+outputs/
+
+# Android 构建产物（android/ 里的工程配置要留，只有 build/ 与 .gradle/ 是产物）
+android/app/build/
+android/build/
+android/.gradle/
+android/capacitor-cordova-android-plugins/
+android/local.properties
+
+# ⚠️ 签名密钥：丢了就无法覆盖安装已发的包，必须自己备份（不要提交到公开仓库）
+android/mobi-release.jks
+
+# 本机数据（真实作品与密钥，绝不外传）
+data/
+.backups/
+
+# 临时与探测文件
+.wb-*
+*.log

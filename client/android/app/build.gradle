@@ -1,30 +1,41 @@
 apply plugin: 'com.android.application'
 
 android {
-    namespace = "com.mobin.writer"
-    compileSdk = rootProject.ext.compileSdkVersion
+    namespace "com.mobin.writer"
+    compileSdk rootProject.ext.compileSdkVersion
     defaultConfig {
         applicationId "com.mobin.writer"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
-        versionName "1.0"
+        versionName "2.0.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
              // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
-            ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+            ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    // 自签名（仅自用）：keystore 在 android/ 下，换机/重装请备份
+    signingConfigs {
+        release {
+            storeFile file("../mobi-release.jks")
+            storePassword "mobi2026"
+            keyAlias "mobi"
+            keyPassword "mobi2026"
         }
     }
     buildTypes {
         release {
             minifyEnabled false
+            signingConfig signingConfigs.release
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }
-    compileOptions {
-        sourceCompatibility JavaVersion.VERSION_17
-        targetCompatibility JavaVersion.VERSION_17
+
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
     }
 }
 

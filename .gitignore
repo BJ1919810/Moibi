@@ -47,3 +47,19 @@ desktop.ini
 
 # Capacitor 临时
 .client/
+
+# 环境类配置（可能含令牌，绝不入库）
+.env*
+
+# 客户端本地数据（真实作品与密钥）
+client/data/
+client/.backups/
+
+# cap sync 生成（构建时再生成）
+client/android/app/src/main/assets/public/
+
+# 书稿数据 / 演示产物（含作品内容）
+client/docs/writer-packet-*
+client/docs/ch2-context-*
+client/docs/flow-*
+client/docs/R3_迁移与待审核清单_*

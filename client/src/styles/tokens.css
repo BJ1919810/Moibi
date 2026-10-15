@@ -1,0 +1,94 @@
+/* ==========================================================================
+   墨笔 · 设计 token
+   继承自 v1（见项目 v1-reference/design-tokens.css），保持「水墨宣纸」体系。
+   v2 面向手机端，尺寸与容器按移动优先重新定义。
+   ========================================================================== */
+
+:root {
+  /* 墨色梯度 */
+  --ink-900: #171a21;
+  --ink-800: #20242f;
+  --ink-700: #2d3342;
+  --ink-600: #46506a;
+  --ink-500: #59617a;
+  --ink-400: #6d7691;
+  --ink-300: #98a0b6;
+
+  /* 宣纸底色 */
+  --paper: #f5f0e4;
+  --paper-2: #ede6d3;
+  --paper-3: #ddd2b8;
+  --paper-card: #fffdf6;
+
+  /* 强调色 */
+  --cinnabar: #c03d1d;
+  --cinnabar-deep: #96290e;
+  --gold: #b8862b;
+  --gold-deep: #8a6420;
+  --gold-soft: #d9b36a;
+  --celadon: #47776a;
+  --cool-blue: #5a6e9a;
+
+  /* 语义 */
+  --border: var(--paper-3);
+  --text: var(--ink-800);
+
+  /* 圆角 */
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-pill: 999px;
+
+  /* 尺寸（移动优先） */
+  --tap: 44px;
+  --pad: 18px;
+  --maxw: 560px;
+
+  /* 阴影 */
+  --shadow-sm: 0 1px 4px rgba(23, 26, 33, .08);
+  --shadow: 0 10px 28px rgba(23, 26, 33, .14);
+  --shadow-lg: 0 22px 54px rgba(23, 26, 33, .26);
+
+  --focus-ring: 0 0 0 3px rgba(192, 61, 29, .16);
+  --tr: .2s ease;
+
+  /* 字体三档。中文系统字体兜底，避免网络字体不可用时塌掉 */
+  --font-display: "Ma Shan Zheng", "STKaiti", "KaiTi", "Kaiti SC", "楷体", serif;
+  --font-reading: "Noto Serif SC", "Songti SC", "STSong", "SimSun", "宋体", serif;
+  --font-ui: "Noto Sans SC", -apple-system, BlinkMacSystemFont, "PingFang SC",
+    "Microsoft YaHei", "Heiti SC", sans-serif;
+
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body, #root { height: 100%; }
+
+body {
+  font-family: var(--font-ui);
+  color: var(--ink-900);
+  background: var(--paper);
+  overflow-x: hidden;
+  overscroll-behavior-y: none;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button, input, textarea, select { font-family: inherit; font-size: inherit; color: inherit; }
+button { background: none; border: none; cursor: pointer; }
+
+::selection { background: #c03d1d38; }
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--cinnabar); outline-offset: 2px; border-radius: 4px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *:before, *:after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}
